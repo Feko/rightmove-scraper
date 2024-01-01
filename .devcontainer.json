@@ -1,0 +1,17 @@
+{
+	"name": "rightmove-scraper",
+	"dockerComposeFile": ["docker-compose.yml"],
+	"service": "rightmove",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-toolsai.jupyter"
+			]
+		}
+	},
+	"workspaceFolder": "/workspace/",
+	"postCreateCommand": "pip install ipykernel"
+	//pip install 'ipykernel<=6.8.0,>=6.4.0' - ARN
+	//pip install ipykernel - AMD
+}
