@@ -1,11 +1,12 @@
 import re
 import smtplib
 import ssl
-import json
 
 from bs4 import BeautifulSoup
 import requests
 import peewee
+
+
 
 class SearchScraper:
     def __init__(
@@ -26,19 +27,15 @@ class SearchScraper:
         page = int(self.start_page)
         while True:
             print("Processing page {}".format(page))
-            html = self.get(starting_endpoint, page, params)
-            links = self.get_item_link_list_func(html)
+            links = self.get_item_link_list_func(
+                self.get(starting_endpoint, page, params)
+            )
             if not links:
                 print("Finished searching")
                 break
             for link in links:
                 yield self.get(link)
-            soup = BeautifulSoup(html, "html.parser")
-            pagination = json.loads(re.search('{.*}', soup(text=re.compile(r'window.jsonModel'))[0])[0])['pagination']
-            if 'next' in pagination.keys():
-                page = int(pagination['next'])
-            else:
-                break
+            page = page + self.per_page
 
     def get(self, endpoint, page=0, params={}):
         headers = {
@@ -60,52 +57,75 @@ class SearchScraper:
 class Rightmove:
     def __init__(self, user_agent):
         self.params = {
-            #'searchType': 'RENT',
-            #'locationIdentifier': 'REGION%5E357',
+            'searchType': 'RENT',
+            'locationIdentifier': 'OUTCODE^1666',
             'insId': '1',
-            #'radius': '0.0',
-            #'minPrice': '2750',
-            #'maxPrice': '3250',
-            #'minBedrooms': '2',
-            #'maxDaysSinceAdded': '7',
+            'radius': '0.0',
+            'minPrice': '2750',
+            'maxPrice': '3250',
+            'minBedrooms': '2',
+            'maxDaysSinceAdded': '7',
             # 'includeSSTC': 'true',
             # '_includeSSTC': 'on'
+
+
         }
         self.endpoint = "http://www.rightmove.co.uk/"
         self.endpoint_rent_search = "property-to-rent/find.html"
-        self.endpoint_buy_search = "property-for-sale/find.html"
 
         self.scraper = SearchScraper(
             page_param="index",
             per_page=10,
-            get_item_link_list_func=lambda html: self.get_item_link_list_func(html),
+            get_item_link_list_func=lambda html: set([
+                self.endpoint + x['href'] for x in
+                BeautifulSoup(html, "html.parser").find_all(
+                    "a",
+                    attrs={'class': 'propertyCard-link'}
+                ) if x['href']
+            ]),
             user_agent=user_agent
         )
 
-    def get_item_link_list_func(self, html):
-        soup = BeautifulSoup(html, "html.parser")
-        properties = json.loads(re.search('{.*}', soup(text=re.compile(r'window.jsonModel'))[0])[0])['properties']
-        return {self.endpoint[:-1] + url['propertyUrl'] for url in properties}
-
-    def search(self, params={}):
+    def rental_search(self, params={}):
         merged_params = self.params.copy()
         merged_params.update(params)
-        for property_html in self.scraper.search(
-                self.endpoint + (self.endpoint_rent_search if params['searchType']=='RENT' else self.endpoint_buy_search),
+        for rental_property_html in self.scraper.search(
+                self.endpoint + self.endpoint_rent_search,
                 merged_params,
                 True
         ):
-            soup = BeautifulSoup(property_html, "html.parser")
-            propertyDATA = json.loads(re.search('{.*}', soup(text=re.compile(r'window.PAGE_MODEL'))[0])[0])['propertyData']
+            soup = BeautifulSoup(rental_property_html, "html.parser")
             yield Property(
-                id=int(propertyDATA['id']),
-                title=propertyDATA['text']['pageTitle'],
-                link="https://www.rightmove.co.uk/properties/" + propertyDATA['id'],
-                price=propertyDATA['prices']['primaryPrice'],
-                description=propertyDATA['text']['description'],
-                stations=[station['name'] for station in propertyDATA['nearestStations']],
-                images=[img['url'] for img in propertyDATA['images']]
+                id=int(re.search(
+                    "(.*)property-(.*).html",
+                    soup.find_all("link")[1]['href']
+                ).group(2)),
+                title=soup.find_all("h1", attrs={'class': 'fs-22'})[0].text,
+                link=soup.find_all("link")[1]['href'],
+                price=soup.find_all(
+                    "p",
+                    attrs={'class': 'property-header-price'}
+                )[0].findChildren()[0].text.strip(),
+                description=soup.find_all(
+                    "div",
+                    attrs={"class": "description"}
+                )[0].text.strip().replace("\n", " "),
+                stations=[
+                    x.text.strip().replace("\n", " ") for x in
+                    soup.find_all(
+                        "ul",
+                        attrs={'class': 'stations-list'}
+                    )[0].findChildren("li")
+                ],
+                images=[
+                    x['src'] for x in
+                    soup.find_all(
+                        "div",
+                        attrs={'class': 'gallery-grid'}
+                    )[0].findChildren("img")
+                ]
             )
+
 
 database = peewee.SqliteDatabase("rightmove.db")
 

@@ -1,3 +1,0 @@
-from rightmove_scan_notify import prepare_search_parameters
-
-prepare_search_parameters()
