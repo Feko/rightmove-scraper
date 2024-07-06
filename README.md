@@ -20,8 +20,9 @@ rightmove.py is a simple Python interface to scrape property listings to buy or 
    - tenure (leasehold / freehold)
    - property_type
    - post_code
- - Filters out retirement out by default
- - Filters only houses by default 
+ - The extracted area (rarely available, unfortunately) is converted from square feet to square meters.
+ - Filters out retirement out by default.
+ - Filters only houses by default.
 
 ## Usage
 Tested in Python 3.11. Ensure to have the dependencies installed with `$ pip install -r requirements.txt`
