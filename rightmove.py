@@ -1,11 +1,8 @@
-import re
-import smtplib
-import ssl
+import re, json, time
 
 from bs4 import BeautifulSoup
 import requests
 import peewee
-
 
 
 class SearchScraper:
@@ -38,6 +35,9 @@ class SearchScraper:
             page = page + self.per_page
 
     def get(self, endpoint, page=0, params={}):
+        time.sleep(2) #Try to avoid rate limiting
+
+        print("Getting " + endpoint)
         headers = {
             'User-Agent': self.user_agent
         }
@@ -50,28 +50,23 @@ class SearchScraper:
             except Exception as e:
                 print("Couldn't connect, retrying...")
                 continue
-            r.raise_for_status()
+            #r.raise_for_status()
             break
         return r.text
 
 class Rightmove:
     def __init__(self, user_agent):
         self.params = {
-            'searchType': 'RENT',
-            'locationIdentifier': 'OUTCODE^1666',
-            'insId': '1',
-            'radius': '0.0',
-            'minPrice': '2750',
-            'maxPrice': '3250',
-            'minBedrooms': '2',
-            'maxDaysSinceAdded': '7',
-            # 'includeSSTC': 'true',
-            # '_includeSSTC': 'on'
-
-
+            'locationIdentifier': '',
+            'minPrice': '',
+            'maxPrice': '',
+            'minBedrooms': '',
+            'propertyTypes': 'detached,semi-detached,terraced',
+            'includeSSTC': 'false',
+            'dontShow': 'retirement',
         }
-        self.endpoint = "http://www.rightmove.co.uk/"
-        self.endpoint_rent_search = "property-to-rent/find.html"
+        self.endpoint = "https://www.rightmove.co.uk"
+        self.endpoint_search = "/property-for-sale/find.html"
 
         self.scraper = SearchScraper(
             page_param="index",
@@ -85,45 +80,49 @@ class Rightmove:
             ]),
             user_agent=user_agent
         )
+    
+    def get_area(self, text):
+        nums = re.findall(r'\d+', text)
+        if len(nums) == 0 or int(nums[0]) < 1:
+            return 0
+        return int(nums[0]) / 10.764
 
-    def rental_search(self, params={}):
+    def search(self, params={}):
         merged_params = self.params.copy()
         merged_params.update(params)
-        for rental_property_html in self.scraper.search(
-                self.endpoint + self.endpoint_rent_search,
+        for property_html in self.scraper.search(
+                self.endpoint + self.endpoint_search,
                 merged_params,
                 True
         ):
-            soup = BeautifulSoup(rental_property_html, "html.parser")
+            raw_html = property_html.splitlines()
+            model_lines = [x.replace('window.PAGE_MODEL =','') for x in raw_html if 'window.PAGE_MODEL =' in x]
+            if len(model_lines) == 0:
+                raise Exception("No model found");
+                    
+            dict = json.loads(model_lines[0]);
+            reel_items = dict["propertyData"]["infoReelItems"]
             yield Property(
-                id=int(re.search(
-                    "(.*)property-(.*).html",
-                    soup.find_all("link")[1]['href']
-                ).group(2)),
-                title=soup.find_all("h1", attrs={'class': 'fs-22'})[0].text,
-                link=soup.find_all("link")[1]['href'],
-                price=soup.find_all(
-                    "p",
-                    attrs={'class': 'property-header-price'}
-                )[0].findChildren()[0].text.strip(),
-                description=soup.find_all(
-                    "div",
-                    attrs={"class": "description"}
-                )[0].text.strip().replace("\n", " "),
+                id=int(dict["propertyData"]["id"]),
+                title=dict["propertyData"]["text"]["pageTitle"],
+                link=dict["metadata"]["copyLinkUrl"],
+                price=dict["propertyData"]["prices"]["primaryPrice"],
+                description=dict["propertyData"]["text"]["description"],
                 stations=[
-                    x.text.strip().replace("\n", " ") for x in
-                    soup.find_all(
-                        "ul",
-                        attrs={'class': 'stations-list'}
-                    )[0].findChildren("li")
+                    x["name"].strip().replace("\n", " ") for x in
+                    dict["propertyData"]["nearestStations"]
                 ],
                 images=[
-                    x['src'] for x in
-                    soup.find_all(
-                        "div",
-                        attrs={'class': 'gallery-grid'}
-                    )[0].findChildren("img")
-                ]
+                    x["url"] for x in
+                    dict["propertyData"]["images"]
+                ],
+                bedrooms=reel_items[1]["primaryText"] if len(reel_items) >= 2 else "",
+                bathrooms=reel_items[2]["primaryText"] if len(reel_items) >= 3 else "",
+                area=self.get_area(reel_items[3]["primaryText"] if len(reel_items) >= 4 else "0"),
+                tenure=dict["propertyData"]["tenure"]["tenureType"],
+                property_type=dict["propertyData"]["propertySubType"],
+                address=dict["propertyData"]["address"]["displayAddress"],
+                post_code=dict["propertyData"]["address"]["outcode"]
             )
 
 
@@ -139,6 +138,13 @@ class Property(peewee.Model):
     stations = peewee.CharField()
     images = peewee.CharField()
     favourite = peewee.BooleanField(default=False)
+    bedrooms = peewee.CharField()
+    bathrooms = peewee.CharField()
+    area = peewee.CharField()
+    tenure = peewee.CharField()
+    property_type = peewee.CharField()
+    address = peewee.CharField()
+    post_code = peewee.CharField()
 
     class Meta:
         database = database
@@ -150,45 +156,38 @@ def minify(text):
 if __name__ == "__main__":
     print("Starting house search...")
 
-    Property.create_table(fail_silently=True)
+    Property.create_table(fail_silently=False)
 
     rightmove = Rightmove(
-        user_agent="Kate is looking for a flat so made her own scraper"
+        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
 
-    properties = ""
+    # This is used to favourite a property. Favourite means a column in a table, unrelated to RightMove feature
+    yes_pls = [
+        'conservatory',
+        'garage',
+        'workshop',
+        'balcony',
+    ]
 
-    SUBJECT = "Rightmove New Available Properties"
+    # This is used to filter out a property if it has any of these words in the description
+    no_thx = [
+        'AUCTION',
+        'auction'
+    ]
 
-    port = 465  # For SSL
-    smtp_server = "smtp.gmail.com"
-    sender_email = ""  # Enter your address
-    receiver_email = ""  # Enter receiver address
-    password = ""
-
-    context = ssl.create_default_context()
-
-    for house in rightmove.rental_search({"radius": "0.0"}):
+    for house in rightmove.search({
+            "radius": "0.0",            
+            'locationIdentifier': 'REGION^93917',
+            'minPrice': '300000',
+            'maxPrice': '400000',
+            'minBedrooms': '3'}):
         house.description_minified = minify(house.description)
 
-        yes_pls = [
-            'underfloor',
-            'stunning',
-            'wooden floor',
-            'balcony',
-            'terrace',
-            'loft'
-        ]
+        if any(n in house.description_minified for n in no_thx):
+            continue
 
-        no_thx = [
-            'groundfloor'
-        ]
-        if any(
-                y in house.description_minified for y in yes_pls
-        ) and not any(
-            n in house.description_minified for n in no_thx
-        ):
-            house.favourite = True
+        house.favourite = any(y in house.description_minified for y in yes_pls)
 
         try:
             house.save(force_insert=True)
@@ -196,18 +195,8 @@ if __name__ == "__main__":
         except peewee.IntegrityError as e:
             pass
 
-        out = "{} / {} - {}".format(house.title, house.price, house.link)
-        properties = properties + '\n' + "{} - {}".format(house.title, house.link)
-        message = 'Subject: {}\n\n{}'.format(SUBJECT, properties)
-        if house.favourite:
-            out = "OMG! {}".format(out)
-            properties = properties + '\n' + "{} - {}".format(house.title, house.link)
-            message = 'Subject: {}\n\n{}'.format(SUBJECT, properties)
+        out = "{} / {} - {}/{} {}".format(house.title, house.price, house.bedrooms,house.bathrooms, house.area)
         print(out)
-
-    with smtplib.SMTP_SSL(smtp_server, port, context=context) as server:
-        server.login(sender_email, password)
-        server.sendmail(sender_email, receiver_email, message)
 
 
 
